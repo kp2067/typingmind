@@ -13,40 +13,18 @@ export default async function auth(request, context) {
     const password = formData.get("password");
 
     if (password === "YourSecretPassword") {
-      
-      // Get the actual page response from Netlify
-      const response = await context.next();
-      
-      // Read the HTML body as text
-      const originalBody = await response.text();
 
-      // ---- INJECTION HAPPENS HERE ----
-      // We ADD our script tag just before </body>
-      const scriptToInject = `
-        <script>
-          // Set sessionStorage so this tab knows it's authenticated
-          sessionStorage.setItem("tab_auth", "true");
-        </script>
-      `;
-
-      const modifiedBody = originalBody.replace(
-        "</body>",
-        scriptToInject + "</body>"
-      );
-      // ---- END OF INJECTION ----
-
-      // Build new headers with the cookie
-      const headers = new Headers(response.headers);
-      headers.set(
-        "Set-Cookie",
-        "auth=valid_session; Path=/; HttpOnly; Secure; Max-Age=86400"
-      );
-
-      // Return the MODIFIED response (with injected script)
-      return new Response(modifiedBody, {
-        status: response.status,
-        headers,
+      // ---- FIX: Redirect to GET instead of returning POST response ----
+      return new Response(null, {
+        status: 302,  // Redirect
+        headers: {
+          // Set the auth cookie
+          "Set-Cookie": "auth=valid_session; Path=/; HttpOnly; Secure; Max-Age=86400",
+          // Redirect user back to the page they were on (as GET request)
+          "Location": url.pathname || "/",
+        },
       });
+      // ---- END FIX ----
 
     } else {
       // Wrong password
@@ -54,14 +32,10 @@ export default async function auth(request, context) {
     }
   }
 
-  // ✅ Handle GET requests - check sessionStorage via cookie
-  // If no cookie, show login page
+  // No cookie, show login page
   return showLoginPage(false);
 }
 
-// -----------------------------------------------
-// Login Page HTML
-// -----------------------------------------------
 function showLoginPage(wrongPassword) {
   return new Response(
     `
@@ -132,8 +106,8 @@ function showLoginPage(wrongPassword) {
         </div>
 
         <script>
-          // When login page loads, check if this tab has sessionStorage
-          // If NOT, clear the server cookie so user must login
+          // When login page loads, check sessionStorage
+          // If NOT set, clear the server cookie
           if (!sessionStorage.getItem("tab_auth")) {
             document.cookie = 
               "auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;";
