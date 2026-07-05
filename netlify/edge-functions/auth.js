@@ -1,112 +1,78 @@
 export default async function auth(request, context) {
   const url = new URL(request.url);
   const cookie = request.headers.get("cookie") || "";
-  const pathname = url.pathname;
 
-  // ✅ Logout route - clears cookie and redirects to login
-  if (pathname === "/logout") {
-    return new Response(null, {
-      status: 302,
-      headers: {
-        "Set-Cookie": "auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure",
-        "Location": "/",
-      },
-    });
-  }
-
-  // ✅ Session bridge page - sets sessionStorage then redirects
-  if (pathname === "/session-bridge") {
-    const redirectTo = url.searchParams.get("redirect") || "/";
-    return new Response(sessionBridgePage(redirectTo), {
-      status: 200,
-      headers: { "Content-Type": "text/html" },
-    });
-  }
-
-  // ✅ Session check route - called by beacon on tab close
-  if (pathname === "/session-check") {
-    return new Response("ok", { status: 200 });
-  }
-
-  // ✅ Cookie exists, allow access
+  // ✅ Check for valid session cookie with timestamp
   if (cookie.includes("auth=valid_session")) {
+    // Extract timestamp from cookie
+    const match = cookie.match(/auth_time=(\d+)/);
+    if (match) {
+      const loginTime = parseInt(match[1]);
+      const now = Date.now();
+      const hoursPassed = (now - loginTime) / (1000 * 60 * 60);
+
+      // ❌ If more than 24 hours passed, force re-login
+      if (hoursPassed > 24) {
+        return expireAndRedirect(url);
+      }
+    }
+    // ✅ Within 24 hours, allow access
     return context.next();
   }
 
-  // ✅ Handle POST login
+  // ✅ Handle POST (form submission)
   if (request.method === "POST") {
     const formData = await request.formData();
     const password = formData.get("password");
 
-    if (password === "YourSecretPassword") {
+    if (password === "MyP4ss2026") {
+      const loginTime = Date.now();
+
       return new Response(null, {
         status: 302,
         headers: {
-          "Set-Cookie": "auth=valid_session; Path=/; HttpOnly; Secure; Max-Age=86400",
-          "Location": "/session-bridge?redirect=" + (pathname || "/"),
+          // SESSION cookie (no Max-Age = clears on browser close)
+          // TWO cookies set together:
+          // 1. auth cookie - session based (clears on browser close)
+          // 2. auth_time cookie - stores login timestamp for 24hr check
+          "Set-Cookie": [
+            "auth=valid_session; Path=/; HttpOnly; Secure; SameSite=Strict",
+            `auth_time=${loginTime}; Path=/; HttpOnly; Secure; SameSite=Strict`,
+          ].join(", "),
+          "Location": url.pathname || "/",
         },
       });
+
     } else {
-      return showLoginPage(true, pathname);
+      return showLoginPage(true);
     }
   }
 
-  return showLoginPage(false, pathname);
+  // No cookie, show login page
+  return showLoginPage(false);
 }
 
-function sessionBridgePage(redirectTo) {
-  return `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Loading...</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
-            margin: 0;
-            background: #f0f0f0;
-          }
-          .spinner {
-            width: 40px;
-            height: 40px;
-            border: 4px solid #ddd;
-            border-top: 4px solid #00ad9f;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 0 auto 1rem auto;
-          }
-          @keyframes spin { to { transform: rotate(360deg); } }
-          p { color: #555; text-align: center; }
-        </style>
-      </head>
-      <body>
-        <div>
-          <div class="spinner"></div>
-          <p>Loading, please wait...</p>
-        </div>
-
-        <script>
-          // ✅ Mark this tab as authenticated
-          sessionStorage.setItem("tab_auth", "true");
-
-          // ✅ When this tab closes, call /logout to clear cookie
-          window.addEventListener("beforeunload", function() {
-            navigator.sendBeacon("/logout");
-          });
-
-          // ✅ Go to actual site
-          window.location.href = "${redirectTo}";
-        </script>
-      </body>
-    </html>
-  `;
+// -----------------------------------------------
+// Helper: Expire cookies and redirect to login
+// -----------------------------------------------
+function expireAndRedirect(url) {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      // Clear both cookies
+      "Set-Cookie": [
+        "auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
+        "auth_time=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
+      ].join(", "),
+      "Location": url.pathname || "/",
+    },
+  });
 }
 
-function showLoginPage(wrongPassword, pathname) {
+// -----------------------------------------------
+// Login Page HTML
+// -----------------------------------------------
+function showLoginPage(wrongPassword) {
   return new Response(
     `
     <!DOCTYPE html>
@@ -155,6 +121,7 @@ function showLoginPage(wrongPassword, pathname) {
           .error {
             color: red;
             font-size: 0.9rem;
+            margin-top: 0.5rem;
           }
         </style>
       </head>
@@ -173,13 +140,6 @@ function showLoginPage(wrongPassword, pathname) {
             <button type="submit">Login</button>
           </form>
         </div>
-
-        <script>
-          if (!sessionStorage.getItem("tab_auth")) {
-            document.cookie = 
-              "auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure";
-          }
-        </script>
       </body>
     </html>
     `,
