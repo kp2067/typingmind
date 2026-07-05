@@ -1,0 +1,6 @@
+[build]
+  publish = "src"        # Tell Netlify your website is in /src
+
+[[edge_functions]]
+  path = "/*"
+  function = "auth"
