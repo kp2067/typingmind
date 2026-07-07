@@ -115,7 +115,7 @@ export default async function auth(request, context) {
         const hoursPassed = (now - loginTime) / (1000 * 60 * 60);
 
         // ❌ More than 24 hours passed, force re-login
-        if (hoursPassed > 24) {
+        if (hoursPassed > 2) {
           return expireAndRedirect(url);
         }
       }
@@ -147,7 +147,7 @@ export default async function auth(request, context) {
           // 2. auth_time = login timestamp for 24hr check
           "Set-Cookie": [
             `auth=${signedToken}; Path=/; HttpOnly; Secure; SameSite=Strict`,
-            `auth_time=${loginTime}; Path=/; HttpOnly; Secure; SameSite=Strict`,
+            `auth_time=${loginTime}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=7200`,
           ].join(", "),
           Location: url.pathname || "/",
         },
