@@ -1,54 +1,164 @@
+// -----------------------------------------------
+// Environment Variables (set in Netlify Dashboard)
+// NETLIFY ENV VARS NEEDED:
+//   APP_PASSWORD = your login password
+//   SECRET_KEY   = a long random string for signing
+// -----------------------------------------------
+const PASSWORD = Netlify.env.get("APP_PASSWORD");
+const SECRET_KEY = Netlify.env.get("SECRET_KEY");
+
+// -----------------------------------------------
+// Generate a random hex token (32 bytes = 64 chars)
+// -----------------------------------------------
+function generateToken() {
+  const array = new Uint8Array(32);
+  crypto.getRandomValues(array);
+  return Array.from(array, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// -----------------------------------------------
+// Create a signed token: "randomToken.HMACsignature"
+// -----------------------------------------------
+async function createSignedToken() {
+  const token = generateToken();
+  const encoder = new TextEncoder();
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(SECRET_KEY),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(token)
+  );
+
+  const sigHex = Array.from(
+    new Uint8Array(signature),
+    (b) => b.toString(16).padStart(2, "0")
+  ).join("");
+
+  // Final token format: "randompart.signaturepart"
+  return `${token}.${sigHex}`;
+}
+
+// -----------------------------------------------
+// Verify a signed token - returns true/false
+// -----------------------------------------------
+async function verifySignedToken(cookieValue) {
+  try {
+    const [token, signature] = cookieValue.split(".");
+
+    // If either part is missing, reject
+    if (!token || !signature) return false;
+
+    const encoder = new TextEncoder();
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(SECRET_KEY),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+
+    const sigBytes = new Uint8Array(
+      signature.match(/.{2}/g).map((b) => parseInt(b, 16))
+    );
+
+    const isValid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sigBytes,
+      encoder.encode(token)
+    );
+
+    return isValid;
+  } catch {
+    // Any error (malformed token, etc.) = invalid
+    return false;
+  }
+}
+
+// -----------------------------------------------
+// Extract a specific cookie value by name
+// -----------------------------------------------
+function getCookieValue(cookieHeader, name) {
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? match[1] : null;
+}
+
+// -----------------------------------------------
+// Main Edge Function
+// -----------------------------------------------
 export default async function auth(request, context) {
   const url = new URL(request.url);
-  const cookie = request.headers.get("cookie") || "";
+  const cookieHeader = request.headers.get("cookie") || "";
 
-  // ✅ Check for valid session cookie with timestamp
-  if (cookie.includes("auth=valid_session")) {
-    // Extract timestamp from cookie
-    const match = cookie.match(/auth_time=(\d+)/);
-    if (match) {
-      const loginTime = parseInt(match[1]);
-      const now = Date.now();
-      const hoursPassed = (now - loginTime) / (1000 * 60 * 60);
+  // ✅ Step 1: Check for existing auth cookie
+  const existingToken = getCookieValue(cookieHeader, "auth");
 
-      // ❌ If more than 24 hours passed, force re-login
-      if (hoursPassed > 24) {
-        return expireAndRedirect(url);
+  if (existingToken) {
+    const isValid = await verifySignedToken(existingToken);
+
+    if (isValid) {
+      // ✅ Token is genuine, now check 24hr expiry
+      const authTime = getCookieValue(cookieHeader, "auth_time");
+
+      if (authTime) {
+        const loginTime = parseInt(authTime);
+        const now = Date.now();
+        const hoursPassed = (now - loginTime) / (1000 * 60 * 60);
+
+        // ❌ More than 24 hours passed, force re-login
+        if (hoursPassed > 24) {
+          return expireAndRedirect(url);
+        }
       }
+
+      // ✅ Valid token + within 24hrs, allow access
+      return context.next();
+    } else {
+      // ❌ Token failed verification (forged/tampered)
+      // Clear bad cookies and show login
+      return expireAndRedirect(url);
     }
-    // ✅ Within 24 hours, allow access
-    return context.next();
   }
 
-  // ✅ Handle POST (form submission)
+  // ✅ Step 2: Handle POST (form submission)
   if (request.method === "POST") {
     const formData = await request.formData();
     const password = formData.get("password");
 
-    if (password === "MyP4ss2026") {
+    if (password === PASSWORD) {
+      // ✅ Correct password - generate signed token
+      const signedToken = await createSignedToken();
       const loginTime = Date.now();
 
       return new Response(null, {
         status: 302,
         headers: {
-          // SESSION cookie (no Max-Age = clears on browser close)
-          // TWO cookies set together:
-          // 1. auth cookie - session based (clears on browser close)
-          // 2. auth_time cookie - stores login timestamp for 24hr check
+          // TWO cookies:
+          // 1. auth = signed token (replaces plain "valid_session")
+          // 2. auth_time = login timestamp for 24hr check
           "Set-Cookie": [
-            "auth=valid_session; Path=/; HttpOnly; Secure; SameSite=Strict",
+            `auth=${signedToken}; Path=/; HttpOnly; Secure; SameSite=Strict`,
             `auth_time=${loginTime}; Path=/; HttpOnly; Secure; SameSite=Strict`,
           ].join(", "),
-          "Location": url.pathname || "/",
+          Location: url.pathname || "/",
         },
       });
-
     } else {
+      // ❌ Wrong password
       return showLoginPage(true);
     }
   }
 
-  // No cookie, show login page
+  // No cookie, no POST - show login page
   return showLoginPage(false);
 }
 
@@ -64,7 +174,7 @@ function expireAndRedirect(url) {
         "auth=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
         "auth_time=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT;",
       ].join(", "),
-      "Location": url.pathname || "/",
+      Location: "/",
     },
   });
 }
